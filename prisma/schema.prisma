@@ -1,0 +1,413 @@
+// LIVE-AI-PHOTO Database Schema
+// Stack: PostgreSQL + Prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// AUTH MODELS (NextAuth compatible)
+// ============================================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================
+// COMPANY MODEL (B2B)
+// ============================================
+
+model Company {
+  id          String  @id @default(cuid())
+  name        String
+  nip         String  @unique
+  email       String?
+  phone       String?
+  address     String?
+  city        String?
+  postalCode  String?
+  country     String  @default("PL")
+  freeCredits Int     @default(1) // 1 darmowa grafika na start
+
+  // Relations
+  users            User[]
+  packagePurchases PackagePurchase[] // Wspólne pakiety firmy
+
+  // Meta
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// USER MODEL
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  password      String?
+  role          String    @default("CLIENT") // CLIENT, DESIGNER, ADMIN
+
+  // B2B Company link (optional)
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  // Indywidualne stawki dla grafików (nadpisują globalne)
+  customRatePerGraphic  Int? // null = używaj globalnej stawki (w groszach)
+  customRatePerRevision Int? // null = używaj globalnej stawki (w groszach)
+
+  // Dane dostawy (domyślne dla zamówień)
+  deliveryEmails    String  @default("[]") // JSON array domyślnych maili
+  notificationPhone String? // domyślny telefon do SMS
+
+  // Relations
+  accounts         Account[]
+  sessions         Session[]
+  orders           Order[]
+  assignedTasks    Task[]                 @relation("DesignerTasks")
+  availability     DesignerAvailability[]
+  taskAssignments  TaskAssignment[]
+  packagePurchases PackagePurchase[]
+  subscription     Subscription?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// INVITATION MODEL (for designer invites)
+// ============================================
+
+model Invitation {
+  id        String    @id @default(cuid())
+  email     String
+  token     String    @unique
+  role      String    @default("DESIGNER") // DESIGNER
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdBy String // admin ID
+
+  createdAt DateTime @default(now())
+}
+
+// ============================================
+// SYSTEM SETTINGS (singleton)
+// ============================================
+
+model SystemSettings {
+  id                     String @id @default("settings")
+
+  // Ceny dla klientów
+  pricePerGraphic        Int    @default(4900) // w groszach (49 PLN)
+  expressPriceMultiplier Float  @default(2.0)
+  urgentPriceMultiplier  Float  @default(4.0)
+
+  // Stawki dla grafików
+  designerRatePerGraphic  Int    @default(2000) // w groszach (20 PLN za grafikę)
+  designerRatePerRevision Int    @default(500)  // w groszach (5 PLN za poprawkę)
+
+  // Ustawienia kolejki
+  minutesPerGraphic      Int    @default(30)    // czas na 1 grafikę
+  confirmationTimeout    Int    @default(5)     // minut na potwierdzenie
+  queueMode              String @default("round_robin") // round_robin, least_loaded, priority
+
+  // Wygląd panelu klienta
+  defaultClientView      String @default("classic") // classic, modern, dark, compact, creative
+
+  // Feature flags - włączanie/wyłączanie funkcji
+  expressEnabled         Boolean @default(true)  // tryb Express dostępny
+  urgentEnabled          Boolean @default(true)  // tryb Urgent dostępny
+  packagesEnabled        Boolean @default(true)  // system pakietów/kredytów włączony
+
+  // Czasy realizacji (mnożnik czasu bazowego)
+  expressTimeReduction   Float   @default(0.5)   // Express = 50% czasu normalnego
+  urgentTimeReduction    Float   @default(0.25)  // Urgent = 25% czasu normalnego
+
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// PHOTO PACKAGES
+// ============================================
+
+model PhotoPackage {
+  id            String @id @default(cuid())
+  name          String
+  photoCount    Int // ile zdjęć w pakiecie
+  pricePerPhoto Int // cena za zdjęcie w groszach
+  totalPrice    Int // cena całkowita w groszach
+
+  // Meta
+  isActive  Boolean           @default(true)
+  purchases PackagePurchase[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PackagePurchase {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packageId   String
+  package     PhotoPackage @relation(fields: [packageId], references: [id])
+  creditsLeft Int // pozostałe zdjęcia
+  expiresAt   DateTime?
+
+  // B2B - wspólne pakiety firmy (null = pakiet osobisty)
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
+
+  // Stripe
+  stripePaymentIntentId String?
+
+  createdAt DateTime @default(now())
+}
+
+// ============================================
+// SUBSCRIPTION MODEL (for billing)
+// ============================================
+
+model Subscription {
+  id                   String @id @default(cuid())
+  userId               String @unique
+  user                 User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeCustomerId     String @unique
+  stripeSubscriptionId String @unique
+  stripePriceId        String
+
+  // Plan details
+  plan                String // BASIC, PRO, ENTERPRISE
+  photosPerMonth      Int    @default(0)
+  photosUsedThisMonth Int    @default(0)
+
+  // Status
+  status             String // active, canceled, past_due
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// DESIGNER AVAILABILITY
+// ============================================
+
+model DesignerAvailability {
+  id         String   @id @default(cuid())
+  designerId String
+  designer   User     @relation(fields: [designerId], references: [id], onDelete: Cascade)
+  date       DateTime
+  startTime  String   @default("09:00")
+  endTime    String   @default("17:00")
+
+  isAvailable Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([designerId, date, startTime])
+  @@index([designerId, date])
+}
+
+// ============================================
+// TASK ASSIGNMENT (queue with timeout)
+// ============================================
+
+model TaskAssignment {
+  id         String   @id @default(cuid())
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  designerId String
+  designer   User     @relation(fields: [designerId], references: [id])
+
+  assignedAt  DateTime  @default(now())
+  confirmedAt DateTime?
+  expiredAt   DateTime?
+  rejectedAt  DateTime?
+
+  status String @default("PENDING") // PENDING, CONFIRMED, EXPIRED, REJECTED
+
+  createdAt DateTime @default(now())
+}
+
+// ============================================
+// ORDER MODEL
+// ============================================
+
+model Order {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status String @default("PENDING_INPUT") // PENDING_INPUT, PROMPT_BUILDING, GENERATING, PENDING_REVIEW, IN_PROGRESS, QA_REVIEW, REVISION, COMPLETED, CANCELLED
+
+  // Source of images
+  sourceType String  @default("UPLOAD") // UPLOAD, URL
+  sourceUrl  String? // link do strony z produktem
+
+  // Input from user
+  quantity     Int
+  instructions String
+  voiceNoteUrl String?
+
+  // Structured input (from wizard)
+  style       String? // CLEAN, INDUSTRIAL, PREMIUM, LIFESTYLE, MINIMAL
+  platform    String? // ALLEGRO, AMAZON, INSTAGRAM, FACEBOOK, LANDING_PAGE, UNIVERSAL
+  background  String? // WHITE, CONTEXTUAL, AI_GENERATED, TRANSPARENT
+  constraints String  @default("[]") // JSON array
+  format      String  @default("1:1")
+
+  // AI Processing
+  normalizedPrompt String?
+
+  // Relations
+  originalImages Image[] @relation("OrderOriginalImages")
+  finalImages    Image[] @relation("OrderFinalImages")
+  tasks          Task[]
+
+  // Delivery
+  deliveredAt DateTime?
+
+  // Billing
+  priority              String  @default("NORMAL") // NORMAL, EXPRESS, URGENT
+  priceInCents          Int?
+  isPaid                Boolean @default(false)
+  stripePaymentIntentId String?
+
+  // Credits used (from package or subscription)
+  creditsUsed   Int     @default(0)
+  usedFreeCredit Boolean @default(false)
+
+  // Revision
+  revisionRequested Boolean @default(false)
+  revisionNotes     String?
+
+  // Dane dostawy (nadpisanie wartości z profilu)
+  deliveryEmailsOverride    String? // null = użyj z profilu usera, JSON array
+  notificationPhoneOverride String? // null = użyj z profilu usera
+
+  // Meta
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// TASK MODEL (Designer work unit)
+// ============================================
+
+model Task {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status  String @default("PENDING") // PENDING, ASSIGNED, IN_PROGRESS, QA_PENDING, QA_FAILED, COMPLETED, COMPLAINT
+
+  // Assignment
+  assignedToId String?
+  designer     User?   @relation("DesignerTasks", fields: [assignedToId], references: [id])
+
+  // Assignment queue
+  assignments       TaskAssignment[]
+  currentAssignmentId String?
+
+  // AI Generated previews
+  aiPreviews      Image[] @relation("TaskAIPreviews")
+  selectedPreview String?
+
+  // Designer work
+  editedImages Image[] @relation("TaskEditedImages")
+
+  // QA Checklist
+  qaChecklist String? // JSON string
+  qaApproved  Boolean @default(false)
+  qaNotes     String?
+
+  // Complaint handling
+  complaintReason     String?
+  complaintNotes      String?
+  complaintResolvedAt DateTime?
+
+  // Timing
+  assignedAt  DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================
+// IMAGE MODEL
+// ============================================
+
+model Image {
+  id        String @id @default(cuid())
+  url       String
+  type      String // ORIGINAL, AI_PREVIEW, EDITED, FINAL
+  filename  String?
+  mimeType  String?
+  sizeBytes Int?
+  width     Int?
+  height    Int?
+
+  // AI Generation metadata
+  prompt  String?
+  seed    String?
+  aiScore Float?
+
+  // Relations - Order
+  orderOriginalId String?
+  orderOriginal   Order?  @relation("OrderOriginalImages", fields: [orderOriginalId], references: [id], onDelete: Cascade)
+
+  orderFinalId String?
+  orderFinal   Order?  @relation("OrderFinalImages", fields: [orderFinalId], references: [id], onDelete: Cascade)
+
+  // Relations - Task
+  taskPreviewId String?
+  taskPreview   Task?   @relation("TaskAIPreviews", fields: [taskPreviewId], references: [id], onDelete: Cascade)
+
+  taskEditedId String?
+  taskEdited   Task?   @relation("TaskEditedImages", fields: [taskEditedId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+}
